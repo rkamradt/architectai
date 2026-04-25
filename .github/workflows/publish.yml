@@ -1,4 +1,4 @@
-name: Publish
+name: Build and Push
 
 on:
   push:
@@ -9,30 +9,46 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  publish:
+  build-and-push:
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/login-action@v3
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: tag
+        run: echo "tag=sha-${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/metadata-action@v5
-        id: meta
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-      - uses: docker/build-push-action@v5
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.tag }}
           build-args: |
-            VITE_AUTH0_DOMAIN=randyk.us.auth0.com
-            VITE_AUTH0_CLIENT_ID=ZfrHoOchU1H96Iryj5a8DpnUBJOBanjO
-            VITE_AUTH0_AUDIENCE=https://api.kamradtfamily.net
-            VITE_API_BASE_URL=https://api.kamradtfamily.net/architect
+            VITE_AUTH0_DOMAIN=${{ secrets.VITE_AUTH0_DOMAIN }}
+            VITE_AUTH0_CLIENT_ID=${{ secrets.VITE_AUTH0_CLIENT_ID }}
+            VITE_AUTH0_AUDIENCE=${{ secrets.VITE_AUTH0_AUDIENCE }}
+            VITE_API_BASE_URL=${{ secrets.VITE_API_BASE_URL }}
+
+      - name: Update version-values.yaml in helm-charts
+        run: |
+          git clone https://x-access-token:${{ secrets.HELM_CHARTS_PAT }}@github.com/rkamradt/rkamradt-helm-charts.git
+          cd rkamradt-helm-charts
+          printf 'image:\n  tag: "%s"\n' "${{ steps.tag.outputs.tag }}" > architectai/version-values.yaml
+          git config user.email "actions@github.com"
+          git config user.name "GitHub Actions"
+          git add architectai/version-values.yaml
+          git commit -m "Update architectai image tag to ${{ steps.tag.outputs.tag }}"
+          git push
