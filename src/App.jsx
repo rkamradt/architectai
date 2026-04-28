@@ -37,6 +37,32 @@ function techColor(tech = '') {
   return C.accentBr;
 }
 
+// ── Archetype helpers ─────────────────────────────────────────────────────────
+const ARCHETYPE_COLORS = {
+  http:      C.accentBr,
+  messaging: C.amber,
+  provider:  C.green,
+  adaptor:   C.purple,
+};
+
+function archetypeLabel(archetype) {
+  return { http: 'HTTP', messaging: 'MSG', provider: 'PRVD', adaptor: 'ADPT' }[archetype] || 'HTTP';
+}
+
+function applyArchetypeSuffix(id, name, archetype) {
+  if (archetype === 'provider') {
+    const newId   = id.endsWith('-provider')   ? id   : id.replace(/-provider$|-adaptor$/, '') + '-provider';
+    const newName = name.endsWith('Provider')  ? name : name.replace(/Provider$|Adaptor$/, '') + 'Provider';
+    return { id: newId, name: newName };
+  }
+  if (archetype === 'adaptor') {
+    const newId   = id.endsWith('-adaptor')    ? id   : id.replace(/-provider$|-adaptor$/, '') + '-adaptor';
+    const newName = name.endsWith('Adaptor')   ? name : name.replace(/Provider$|Adaptor$/, '') + 'Adaptor';
+    return { id: newId, name: newName };
+  }
+  return { id, name };
+}
+
 // ── Ecosystem update parsing ──────────────────────────────────────────────────
 function parseUpdates(text) {
   const out = [];
@@ -65,11 +91,30 @@ ${services.length === 0
 
 When the user has agreed to add or update a service, emit EXACTLY this JSON block — no prose inside the tags:
 <ecosystem_update>
-{"action":"add","service":{"id":"kebab-case-id","name":"ServiceName","purpose":"One sentence: what this service owns and is responsible for","tech":"Spring Boot","apis":[{"method":"POST","path":"/path","description":"what this endpoint does"}],"events":[{"direction":"produces","topic":"domain.event.name","description":"what payload this carries"}],"dependencies":["other-service-id"]}}
+{"action":"add","service":{"id":"kebab-case-id","name":"ServiceName","purpose":"One sentence: what this service owns and is responsible for","tech":"Spring Boot","archetype":"http","apis":[{"method":"POST","path":"/path","description":"what this endpoint does"}],"events":[{"direction":"produces","topic":"domain.event.name","description":"what payload this carries"}],"dependencies":["other-service-id"]}}
 </ecosystem_update>
 
 Emit ecosystem_update ONLY when formalizing agreed services — not speculatively during discussion.
 Use "action": "add", "update", or "remove" as appropriate.
+
+## Service archetypes
+
+Every service must have one of these archetypes — choose the one that best describes its primary role:
+
+- **http** — Standard REST/gRPC service with its own API surface and data store. No naming suffix required.
+- **messaging** — Primarily event-driven; publishes and/or subscribes to topics. No naming suffix required.
+- **provider** — Wraps a third-party or external API, exposing it to the ecosystem. The service id MUST end in \`-provider\` and the name MUST end in \`Provider\`. Include a \`foreignApi\` block: \`{"name":"...","baseUrl":"...","authMethod":"apiKey|oauth2|basic","generateMock":true}\`.
+- **adaptor** — Bridges a foreign protocol or data format into the ecosystem. The service id MUST end in \`-adaptor\` and the name MUST end in \`Adaptor\`. Include an \`accepts\` block: \`{"protocol":"...","format":"...","foreignEntity":"...","generateMock":true,"mockBehavior":"..."}\`.
+
+Provider example:
+<ecosystem_update>
+{"action":"add","service":{"id":"stripe-provider","name":"StripeProvider","purpose":"Wraps the Stripe payments API, exposing charge and refund operations to the ecosystem","tech":"Node.js/Express","archetype":"provider","foreignApi":{"name":"Stripe","baseUrl":"https://api.stripe.com","authMethod":"apiKey","generateMock":true},"apis":[{"method":"POST","path":"/charges","description":"Create a charge via Stripe"}],"events":[{"direction":"produces","topic":"payment.charged","description":"Emitted when a charge succeeds"}],"dependencies":[]}}
+</ecosystem_update>
+
+Adaptor example:
+<ecosystem_update>
+{"action":"add","service":{"id":"sftp-adaptor","name":"SftpAdaptor","purpose":"Polls an SFTP server for CSV files and emits structured events","tech":"Node.js/Express","archetype":"adaptor","accepts":{"protocol":"SFTP","format":"CSV","foreignEntity":"OrderExport","generateMock":true,"mockBehavior":"Emit one order.received event per CSV row"},"apis":[],"events":[{"direction":"produces","topic":"order.received","description":"Emitted for each row in an ingested CSV file"}],"dependencies":[]}}
+</ecosystem_update>
 
 Architectural principles to uphold:
 - Single responsibility: each service owns one bounded context
@@ -176,9 +221,20 @@ function Topology({ services, onSelect }) {
 }
 
 // ── Service detail panel ──────────────────────────────────────────────────────
-function DetailPanel({ service, onClose }) {
+function DetailPanel({ service, onClose, onUpdate }) {
+  const [editArch, setEditArch]         = useState(service.archetype || 'http');
+  const [editForeignApi, setEditForeignApi] = useState(
+    service.foreignApi || { name: '', baseUrl: '', authMethod: 'apiKey', generateMock: false }
+  );
+  const [editAccepts, setEditAccepts]   = useState(
+    service.accepts || { protocol: '', format: '', foreignEntity: '', generateMock: false, mockBehavior: '' }
+  );
+  const [editing, setEditing]           = useState(false);
+
   if (!service) return null;
   const col = techColor(service.tech);
+  const arch = service.archetype || 'http';
+  const archCol = ARCHETYPE_COLORS[arch] || C.accentBr;
 
   const Block = ({ label, children }) => (
     <div style={{ marginBottom: '18px' }}>
@@ -188,6 +244,30 @@ function DetailPanel({ service, onClose }) {
       {children}
     </div>
   );
+
+  function applyEdit() {
+    const { id: newId, name: newName } = applyArchetypeSuffix(service.id, service.name, editArch);
+    const updated = {
+      ...service,
+      id: newId,
+      name: newName,
+      archetype: editArch,
+      ...(editArch === 'provider' ? { foreignApi: editForeignApi, accepts: undefined } : {}),
+      ...(editArch === 'adaptor'  ? { accepts: editAccepts, foreignApi: undefined }    : {}),
+      ...(editArch === 'http' || editArch === 'messaging' ? { foreignApi: undefined, accepts: undefined } : {}),
+    };
+    onUpdate(updated);
+    setEditing(false);
+  }
+
+  const fieldStyle = {
+    width: '100%', background: C.bg, border: `1px solid ${C.border}`, borderRadius: '4px',
+    color: C.text, fontFamily: 'IBM Plex Mono', fontSize: '11px', padding: '4px 8px', outline: 'none',
+  };
+  const labelStyle = {
+    color: C.dim, fontSize: '10px', fontWeight: '700', letterSpacing: '0.1em',
+    fontFamily: 'IBM Plex Mono', display: 'block', marginBottom: '3px',
+  };
 
   return (
     <div style={{
@@ -199,8 +279,17 @@ function DetailPanel({ service, onClose }) {
         {/* Header */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '14px' }}>
           <div>
-            <div style={{ color: col, fontFamily: 'IBM Plex Mono', fontSize: '10px', fontWeight: '700', letterSpacing: '0.14em', marginBottom: '4px' }}>
-              {service.tech || 'SERVICE'}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+              <span style={{ color: col, fontFamily: 'IBM Plex Mono', fontSize: '10px', fontWeight: '700', letterSpacing: '0.14em' }}>
+                {service.tech || 'SERVICE'}
+              </span>
+              <span style={{
+                background: archCol + '22', border: `1px solid ${archCol}55`,
+                borderRadius: '3px', padding: '1px 5px',
+                color: archCol, fontFamily: 'IBM Plex Mono', fontSize: '9px', fontWeight: '700', letterSpacing: '0.1em',
+              }}>
+                {archetypeLabel(arch)}
+              </span>
             </div>
             <div style={{ color: C.text, fontSize: '17px', fontWeight: '700' }}>{service.name}</div>
           </div>
@@ -210,6 +299,41 @@ function DetailPanel({ service, onClose }) {
         <p style={{ color: C.muted, fontSize: '13px', lineHeight: '1.65', marginBottom: '18px', paddingBottom: '16px', borderBottom: `1px solid ${C.border}` }}>
           {service.purpose}
         </p>
+
+        {/* Foreign API (provider) */}
+        {arch === 'provider' && service.foreignApi && (
+          <Block label="FOREIGN API">
+            {[
+              ['Name',        service.foreignApi.name],
+              ['Base URL',    service.foreignApi.baseUrl],
+              ['Auth',        service.foreignApi.authMethod],
+              ['Generate mock', service.foreignApi.generateMock ? 'yes' : 'no'],
+            ].map(([k, v]) => v && (
+              <div key={k} style={{ display: 'flex', gap: '8px', marginBottom: '4px' }}>
+                <span style={{ color: C.dim, fontFamily: 'IBM Plex Mono', fontSize: '10px', minWidth: '80px' }}>{k}</span>
+                <span style={{ color: C.muted, fontFamily: 'IBM Plex Mono', fontSize: '11px' }}>{v}</span>
+              </div>
+            ))}
+          </Block>
+        )}
+
+        {/* Accepts (adaptor) */}
+        {arch === 'adaptor' && service.accepts && (
+          <Block label="ACCEPTS">
+            {[
+              ['Protocol',      service.accepts.protocol],
+              ['Format',        service.accepts.format],
+              ['Foreign entity',service.accepts.foreignEntity],
+              ['Generate mock', service.accepts.generateMock ? 'yes' : 'no'],
+              ['Mock behavior', service.accepts.mockBehavior],
+            ].map(([k, v]) => v && (
+              <div key={k} style={{ display: 'flex', gap: '8px', marginBottom: '4px' }}>
+                <span style={{ color: C.dim, fontFamily: 'IBM Plex Mono', fontSize: '10px', minWidth: '80px' }}>{k}</span>
+                <span style={{ color: C.muted, fontFamily: 'IBM Plex Mono', fontSize: '11px' }}>{v}</span>
+              </div>
+            ))}
+          </Block>
+        )}
 
         {/* APIs */}
         {service.apis?.length > 0 && (
@@ -251,6 +375,100 @@ function DetailPanel({ service, onClose }) {
             ))}
           </Block>
         )}
+
+        {/* Archetype edit section */}
+        <div style={{ borderTop: `1px solid ${C.border}`, paddingTop: '14px', marginTop: '6px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+            <span style={{ color: C.dim, fontSize: '10px', fontWeight: '700', letterSpacing: '0.15em', fontFamily: 'IBM Plex Mono' }}>ARCHETYPE</span>
+            {!editing && (
+              <button onClick={() => setEditing(true)}
+                style={{ background: 'none', border: `1px solid ${C.border}`, borderRadius: '3px', color: C.muted, cursor: 'pointer', fontFamily: 'IBM Plex Mono', fontSize: '10px', padding: '2px 8px' }}>
+                edit
+              </button>
+            )}
+          </div>
+          {editing ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              <div>
+                <label style={labelStyle}>ARCHETYPE</label>
+                <select value={editArch} onChange={e => setEditArch(e.target.value)}
+                  style={{ ...fieldStyle, cursor: 'pointer' }}>
+                  <option value="http">http — REST/gRPC service</option>
+                  <option value="messaging">messaging — event-driven</option>
+                  <option value="provider">provider — wraps external API</option>
+                  <option value="adaptor">adaptor — bridges foreign protocol</option>
+                </select>
+                {(editArch === 'provider' || editArch === 'adaptor') && (
+                  <div style={{ color: C.dim, fontFamily: 'IBM Plex Mono', fontSize: '10px', marginTop: '4px' }}>
+                    id/name will get -{editArch} / {editArch === 'provider' ? 'Provider' : 'Adaptor'} suffix
+                  </div>
+                )}
+              </div>
+
+              {editArch === 'provider' && (
+                <>
+                  {[
+                    { key: 'name',      label: 'API NAME',    placeholder: 'Stripe' },
+                    { key: 'baseUrl',   label: 'BASE URL',    placeholder: 'https://api.stripe.com' },
+                    { key: 'authMethod',label: 'AUTH METHOD', placeholder: 'apiKey | oauth2 | basic' },
+                  ].map(f => (
+                    <div key={f.key}>
+                      <label style={labelStyle}>{f.label}</label>
+                      <input value={editForeignApi[f.key] || ''} placeholder={f.placeholder}
+                        onChange={e => setEditForeignApi(prev => ({ ...prev, [f.key]: e.target.value }))}
+                        style={fieldStyle} />
+                    </div>
+                  ))}
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '7px', cursor: 'pointer' }}>
+                    <input type="checkbox" checked={!!editForeignApi.generateMock}
+                      onChange={e => setEditForeignApi(prev => ({ ...prev, generateMock: e.target.checked }))} />
+                    <span style={{ color: C.muted, fontFamily: 'IBM Plex Mono', fontSize: '11px' }}>Generate mock</span>
+                  </label>
+                </>
+              )}
+
+              {editArch === 'adaptor' && (
+                <>
+                  {[
+                    { key: 'protocol',      label: 'PROTOCOL',       placeholder: 'SFTP | AMQP | FTP | SOAP' },
+                    { key: 'format',        label: 'FORMAT',          placeholder: 'CSV | XML | EDI | FixedWidth' },
+                    { key: 'foreignEntity', label: 'FOREIGN ENTITY',  placeholder: 'OrderExport' },
+                    { key: 'mockBehavior',  label: 'MOCK BEHAVIOR',   placeholder: 'Emit one event per row' },
+                  ].map(f => (
+                    <div key={f.key}>
+                      <label style={labelStyle}>{f.label}</label>
+                      <input value={editAccepts[f.key] || ''} placeholder={f.placeholder}
+                        onChange={e => setEditAccepts(prev => ({ ...prev, [f.key]: e.target.value }))}
+                        style={fieldStyle} />
+                    </div>
+                  ))}
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '7px', cursor: 'pointer' }}>
+                    <input type="checkbox" checked={!!editAccepts.generateMock}
+                      onChange={e => setEditAccepts(prev => ({ ...prev, generateMock: e.target.checked }))} />
+                    <span style={{ color: C.muted, fontFamily: 'IBM Plex Mono', fontSize: '11px' }}>Generate mock</span>
+                  </label>
+                </>
+              )}
+
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button onClick={applyEdit}
+                  style={{ flex: 1, background: C.accentBr, border: 'none', borderRadius: '4px', color: '#fff', cursor: 'pointer', fontFamily: 'IBM Plex Mono', fontSize: '11px', fontWeight: '700', padding: '6px 0' }}>
+                  APPLY
+                </button>
+                <button onClick={() => { setEditing(false); setEditArch(service.archetype || 'http'); setEditForeignApi(service.foreignApi || { name: '', baseUrl: '', authMethod: 'apiKey', generateMock: false }); setEditAccepts(service.accepts || { protocol: '', format: '', foreignEntity: '', generateMock: false, mockBehavior: '' }); }}
+                  style={{ flex: 1, background: 'none', border: `1px solid ${C.border}`, borderRadius: '4px', color: C.muted, cursor: 'pointer', fontFamily: 'IBM Plex Mono', fontSize: '11px', padding: '6px 0' }}>
+                  cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div style={{ color: C.muted, fontFamily: 'IBM Plex Mono', fontSize: '11px' }}>
+              <span style={{ color: archCol }}>{arch}</span>
+              {arch === 'provider' && service.foreignApi?.name && ` — ${service.foreignApi.name}`}
+              {arch === 'adaptor' && service.accepts?.protocol && ` — ${service.accepts.protocol}/${service.accepts.format}`}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -281,12 +499,22 @@ function genSpecMd(services, projectName) {
       ? `| Service | \n|---------|\n` + s.dependencies.map(d => `| \`${d}\` |`).join('\n')
       : '_No dependencies._';
 
+    const archetypeSection = s.archetype && s.archetype !== 'http'
+      ? `\n**Archetype:** ${s.archetype}` +
+        (s.archetype === 'provider' && s.foreignApi
+          ? `\n**Foreign API:** ${s.foreignApi.name || ''} — ${s.foreignApi.baseUrl || ''} (auth: ${s.foreignApi.authMethod || '?'})`
+          : '') +
+        (s.archetype === 'adaptor' && s.accepts
+          ? `\n**Accepts:** ${s.accepts.protocol || ''}/${s.accepts.format || ''} — ${s.accepts.foreignEntity || ''}`
+          : '')
+      : '';
+
     return `<!-- service-start: ${s.id} -->
 ## Service: ${s.name}
 
 **ID:** \`${s.id}\`
 **Tech:** ${s.tech || 'TBD'}
-**Purpose:** ${s.purpose}
+**Purpose:** ${s.purpose}${archetypeSection}
 
 ### API Surface
 
@@ -433,15 +661,34 @@ function genServiceClaudeMd(svc, projectName) {
     ? svc.dependencies.map(d => `- \`${d}\``).join('\n')
     : '(none)';
 
+  const arch = svc.archetype || 'http';
+
+  const archetypeBlock = arch === 'provider' && svc.foreignApi
+    ? `\n## Foreign API (${svc.foreignApi.name || 'external'})
+- Base URL: \`${svc.foreignApi.baseUrl || 'TBD'}\`
+- Auth method: ${svc.foreignApi.authMethod || 'TBD'}
+- Generate mock: ${svc.foreignApi.generateMock ? 'yes — create a local stub server for testing' : 'no'}
+`
+    : arch === 'adaptor' && svc.accepts
+    ? `\n## Accepts (foreign input)
+- Protocol: ${svc.accepts.protocol || 'TBD'}
+- Format: ${svc.accepts.format || 'TBD'}
+- Foreign entity: ${svc.accepts.foreignEntity || 'TBD'}
+- Generate mock: ${svc.accepts.generateMock ? 'yes — create a mock sender for testing' : 'no'}
+${svc.accepts.mockBehavior ? `- Mock behavior: ${svc.accepts.mockBehavior}` : ''}
+`
+    : '';
+
   return `# ${svc.name}
 Part of the **${projectName}** ecosystem.
+Archetype: **${arch}**
 
 ## This service owns
 ${svc.purpose}
 
 ## Tech stack
 ${svc.tech || 'TBD'}
-
+${archetypeBlock}
 ## API contracts — implement exactly as specified
 ${apis}
 
@@ -595,6 +842,38 @@ export default function ArchitectAI() {
     return res.json();
   };
 
+  // ── User profile / API key ────────────────────────────────────────────────
+  const [profileChecked, setProfileChecked] = useState(false);
+  const [hasApiKey, setHasApiKey] = useState(false);
+  const [showKeyPanel, setShowKeyPanel] = useState(false);
+  const [apiKeyInput, setApiKeyInput] = useState('');
+  const [apiKeySaving, setApiKeySaving] = useState(false);
+  const [apiKeyError, setApiKeyError] = useState('');
+
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    api('/api/user/profile').then(data => {
+      setHasApiKey(!!data.hasApiKey);
+      setProfileChecked(true);
+    }).catch(() => setProfileChecked(true));
+  }, [isAuthenticated]);
+
+  async function saveApiKey() {
+    if (!apiKeyInput.trim()) return;
+    setApiKeySaving(true);
+    setApiKeyError('');
+    try {
+      const result = await api('/api/user/profile', 'PUT', { anthropicApiKey: apiKeyInput.trim() });
+      if (result.error) throw new Error(result.error);
+      setHasApiKey(true);
+      setApiKeyInput('');
+      setShowKeyPanel(false);
+    } catch (e) {
+      setApiKeyError(e.message);
+    }
+    setApiKeySaving(false);
+  }
+
   const [services, setServices] = useState([]);
   const [messages, setMessages] = useState([{
     role: 'assistant',
@@ -643,11 +922,19 @@ export default function ArchitectAI() {
 
   // ── GitHub integration ────────────────────────────────────────────────────────
   const [ghConfig, setGhConfig] = useState({ token: '', owner: '', repo: '', branch: 'main', path: 'ecosystem.json' });
-  const [ghSha, setGhSha] = useState(null);
-  const [ghSpecSha, setGhSpecSha] = useState(null);
   const [ghStatus, setGhStatus] = useState(null); // null | 'pulling' | 'pushing' | 'ok' | 'error'
   const [ghMsg, setGhMsg] = useState('');
   const [showGhPanel, setShowGhPanel] = useState(false);
+
+  // ── Implement ─────────────────────────────────────────────────────────────────
+  const [implRunning, setImplRunning] = useState(false);
+  const [implLog, setImplLog] = useState([]);
+  const [showImplPanel, setShowImplPanel] = useState(false);
+  const implLogEndRef = useRef(null);
+
+  useEffect(() => {
+    if (showImplPanel) implLogEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [implLog, showImplPanel]);
 
   // Load gh config from backend on mount
   useEffect(() => {
@@ -667,6 +954,37 @@ export default function ArchitectAI() {
       </button>
     </div>
   );
+  if (!profileChecked) return (
+    <div style={{ color: '#64748b', padding: '40px', fontFamily: 'IBM Plex Mono' }}>Loading…</div>
+  );
+  if (!hasApiKey) return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100vh', background: C.bg, gap: '20px' }}>
+      <div style={{ color: C.accentBr, fontFamily: 'IBM Plex Mono', fontSize: '24px', fontWeight: 700 }}>◈ ARCHITECTAI</div>
+      <div style={{ color: C.muted, fontFamily: 'IBM Plex Mono', fontSize: '13px', textAlign: 'center', maxWidth: '360px', lineHeight: '1.6' }}>
+        To get started, enter your Anthropic API key.<br />
+        It will be stored securely and used only for your account.
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', width: '320px' }}>
+        <input
+          type="password"
+          placeholder="sk-ant-…"
+          value={apiKeyInput}
+          onChange={e => setApiKeyInput(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && saveApiKey()}
+          style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: '8px', color: C.text, fontFamily: 'IBM Plex Mono', fontSize: '13px', padding: '10px 14px', outline: 'none' }}
+        />
+        {apiKeyError && <div style={{ color: C.red, fontFamily: 'IBM Plex Mono', fontSize: '11px' }}>{apiKeyError}</div>}
+        <button onClick={saveApiKey} disabled={apiKeySaving || !apiKeyInput.trim()}
+          style={{ background: C.accent, color: '#fff', border: 'none', borderRadius: '8px', padding: '12px', fontFamily: 'IBM Plex Mono', fontSize: '13px', fontWeight: 700, cursor: apiKeySaving ? 'not-allowed' : 'pointer', opacity: apiKeyInput.trim() ? 1 : 0.5 }}>
+          {apiKeySaving ? 'SAVING…' : 'SAVE & CONTINUE'}
+        </button>
+        <button onClick={() => logout({ logoutParams: { returnTo: window.location.origin } })}
+          style={{ background: 'none', border: 'none', color: C.muted, fontFamily: 'IBM Plex Mono', fontSize: '11px', cursor: 'pointer', padding: '4px' }}>
+          sign out
+        </button>
+      </div>
+    </div>
+  );
 
   function saveGhConfig(cfg) {
     setGhConfig(cfg);
@@ -680,9 +998,8 @@ export default function ArchitectAI() {
       if (data.error) throw new Error(data.error);
       if (!data.content) {
         setGhMsg('ecosystem.json not found in repo — push will create it.');
-        setGhStatus('ok'); setGhSha(null); return;
+        setGhStatus('ok'); return;
       }
-      setGhSha(data.sha);
       const text = decodeURIComponent(escape(atob(data.content.replace(/\n/g, ''))));
       const parsed = JSON.parse(text);
       if (parsed.services) {
@@ -698,25 +1015,79 @@ export default function ArchitectAI() {
   async function ghPush() {
     setGhStatus('pushing'); setGhMsg('');
     try {
-      const specPath = (ghConfig.path || 'ecosystem.json').replace('ecosystem.json', 'spec.md');
-      const data = await api('/api/github/push', 'POST', {
-        files: [
-          { path: ghConfig.path || 'ecosystem.json', content: genEcosystemJson(services, projectName), sha: ghSha },
-          { path: specPath, content: genSpecMd(services, projectName), sha: ghSpecSha },
-        ],
-      });
+      const base = (ghConfig.path || 'ecosystem.json').replace(/ecosystem\.json$/, '');
+      const files = [
+        { path: `${base}ecosystem.json`, content: genEcosystemJson(services, projectName) },
+        { path: `${base}spec.md`,        content: genSpecMd(services, projectName) },
+        { path: `${base}CLAUDE.md`,      content: genSpineClaudeMd(services, projectName) },
+        ...services.map(s => ({ path: `${base}${s.id}/CLAUDE.md`, content: genServiceClaudeMd(s, projectName) })),
+      ];
+      const data = await api('/api/github/push', 'POST', { files });
       if (data.error) throw new Error(data.error);
-      const ecoResult = data.results?.find(r => r.path === (ghConfig.path || 'ecosystem.json'));
-      const specResult = data.results?.find(r => r.path === specPath);
-      if (ecoResult?.sha) setGhSha(ecoResult.sha);
-      if (specResult?.sha) setGhSpecSha(specResult.sha);
-      setGhStatus('ok'); setGhMsg(`Pushed ecosystem.json + spec.md to ${ghConfig.owner}/${ghConfig.repo}`);
+      setGhStatus('ok');
+      setGhMsg(`Pushed ${data.results?.length ?? files.length} files to ${ghConfig.owner}/${ghConfig.repo}`);
     } catch (e) {
       setGhStatus('error'); setGhMsg(e.message);
     }
   }
 
   const ghConnected = !!(ghConfig.token && ghConfig.owner && ghConfig.repo);
+
+  function toRepoName(name) {
+    return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') + '-services';
+  }
+
+  async function implement() {
+    if (!services.length || implRunning) return;
+    const repoName = toRepoName(projectName);
+    setImplRunning(true);
+    setImplLog([]);
+    setShowImplPanel(true);
+
+    try {
+      // Step 1: create the GitHub repo
+      const createRes = await api('/api/github/create-repo', 'POST', {
+        repoName,
+        description: `${projectName} — generated by ArchitectAI`,
+        private: false,
+      });
+      if (createRes.error) throw new Error(createRes.error);
+      setImplLog(prev => [...prev, { type: 'start', message: `Repo created: ${createRes.repoUrl}` }]);
+
+      // Step 2: stream the implementation via SSE (EventSource doesn't support POST)
+      const token = await getAccessTokenSilently();
+      const baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001';
+      const res = await fetch(`${baseUrl}/api/implement`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ repoName }),
+      });
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split('\n\n');
+        buffer = parts.pop(); // hold incomplete chunk for next iteration
+        for (const part of parts) {
+          const line = part.trim();
+          if (!line.startsWith('data: ')) continue;
+          try {
+            const event = JSON.parse(line.slice(6));
+            setImplLog(prev => [...prev, event]);
+          } catch {}
+        }
+      }
+    } catch (e) {
+      setImplLog(prev => [...prev, { type: 'error', message: e.message }]);
+    }
+
+    setImplRunning(false);
+  }
 
   // Simple markdown renderer: **bold**, `code`, newlines
   function renderMd(text) {
@@ -794,6 +1165,17 @@ export default function ArchitectAI() {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
   }
 
+  function updateService(updated) {
+    setServices(prev => {
+      const idx = prev.findIndex(s => s.id === selected?.id);
+      if (idx < 0) return prev;
+      const next = [...prev];
+      next[idx] = updated;
+      return next;
+    });
+    setSelected(updated);
+  }
+
   // ── Render ────────────────────────────────────────────────────────────────
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: C.bg, color: C.text, fontFamily: "'IBM Plex Sans', sans-serif", overflow: 'hidden' }}>
@@ -843,14 +1225,23 @@ export default function ArchitectAI() {
               style={{ background: 'none', border: `1px solid ${C.border}`, borderRadius: '4px', color: ghStatus === 'pushing' ? C.amber : C.green, cursor: 'pointer', fontSize: '11px', fontFamily: 'IBM Plex Mono', padding: '2px 9px' }}>
               {ghStatus === 'pushing' ? '…' : '↑ push'}
             </button>
+            <button onClick={implement} disabled={implRunning || !services.length}
+              title={`Scaffold ${toRepoName(projectName)} and push to GitHub`}
+              style={{ background: implRunning ? C.card : C.purple + '22', border: `1px solid ${implRunning || !services.length ? C.border : C.purple + '88'}`, borderRadius: '4px', color: implRunning ? C.muted : C.purple, cursor: implRunning || !services.length ? 'not-allowed' : 'pointer', fontSize: '11px', fontFamily: 'IBM Plex Mono', padding: '2px 9px', fontWeight: '700' }}>
+              {implRunning ? '⟳ building…' : '▶ implement'}
+            </button>
           </>}
+          <button title="Anthropic API key" onClick={() => { setShowKeyPanel(p => !p); setApiKeyInput(''); setApiKeyError(''); }}
+            style={{ background: showKeyPanel ? C.card : 'none', border: `1px solid ${showKeyPanel ? C.accentBr : C.border}`, borderRadius: '4px', color: C.accentBr, cursor: 'pointer', fontSize: '11px', fontFamily: 'IBM Plex Mono', padding: '2px 8px', lineHeight: 1 }}>
+            ⚿
+          </button>
           <button title="GitHub settings" onClick={() => setShowGhPanel(p => !p)}
             style={{ background: showGhPanel ? C.card : 'none', border: `1px solid ${showGhPanel ? C.accentBr : C.border}`, borderRadius: '4px', color: ghConnected ? C.accentBr : C.dim, cursor: 'pointer', fontSize: '13px', fontFamily: 'IBM Plex Mono', padding: '2px 8px', lineHeight: 1 }}>
             ⎔
           </button>
           <button title="Reset ecosystem" onClick={() => {
             if (window.confirm('Clear all services and start over?')) {
-              setServices([]); setSelected(null); setGhSha(null);
+              setServices([]); setSelected(null);
               api('/api/ecosystem', 'PUT', { services: [], projectName }).catch(() => {});
             }
           }} style={{ background: 'none', border: `1px solid ${C.border}`, borderRadius: '4px', color: C.dim, cursor: 'pointer', fontSize: '11px', fontFamily: 'IBM Plex Mono', padding: '2px 8px' }}>
@@ -863,6 +1254,24 @@ export default function ArchitectAI() {
           <div style={{ width: '6px', height: '6px', borderRadius: '50%', background: loading ? C.amber : C.green, transition: 'background .3s' }} title={loading ? 'Thinking...' : 'Ready'} />
         </div>
       </div>
+
+      {/* ── API key update panel ── */}
+      {showKeyPanel && (
+        <div style={{ background: C.card, borderBottom: `1px solid ${C.border}`, padding: '14px 16px', display: 'flex', gap: '10px', alignItems: 'flex-end', flexShrink: 0 }}>
+          <label style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+            <span style={{ color: C.dim, fontFamily: 'IBM Plex Mono', fontSize: '10px', fontWeight: '700', letterSpacing: '0.1em' }}>ANTHROPIC API KEY</span>
+            <input type="password" value={apiKeyInput} placeholder="sk-ant-… (leave blank to keep existing)"
+              onChange={e => setApiKeyInput(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && saveApiKey()}
+              style={{ width: '300px', background: C.surface, border: `1px solid ${C.border}`, borderRadius: '4px', color: C.text, fontFamily: 'IBM Plex Mono', fontSize: '12px', padding: '5px 9px', outline: 'none' }} />
+          </label>
+          {apiKeyError && <span style={{ color: C.red, fontFamily: 'IBM Plex Mono', fontSize: '11px', alignSelf: 'center' }}>{apiKeyError}</span>}
+          <button onClick={saveApiKey} disabled={apiKeySaving || !apiKeyInput.trim()}
+            style={{ background: C.accentBr, border: 'none', borderRadius: '4px', color: '#fff', cursor: apiKeyInput.trim() ? 'pointer' : 'not-allowed', fontFamily: 'IBM Plex Mono', fontSize: '11px', fontWeight: '700', padding: '7px 16px', alignSelf: 'flex-end', opacity: apiKeyInput.trim() ? 1 : 0.45 }}>
+            {apiKeySaving ? 'SAVING…' : 'UPDATE KEY'}
+          </button>
+        </div>
+      )}
 
       {/* ── GitHub settings panel ── */}
       {showGhPanel && (
@@ -897,6 +1306,88 @@ export default function ArchitectAI() {
         </div>
       )}
 
+      {/* ── Implement progress panel ── */}
+      {showImplPanel && (
+        <div style={{ background: C.bg, borderBottom: `1px solid ${C.border}`, flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 16px', background: C.surface, borderBottom: `1px solid ${C.border}` }}>
+            <span style={{ color: C.dim, fontFamily: 'IBM Plex Mono', fontSize: '10px', fontWeight: '700', letterSpacing: '0.14em' }}>
+              IMPLEMENTATION LOG — {toRepoName(projectName)}
+            </span>
+            <button onClick={() => setShowImplPanel(false)}
+              style={{ background: 'none', border: 'none', color: C.muted, cursor: 'pointer', fontFamily: 'IBM Plex Mono', fontSize: '13px' }}>×</button>
+          </div>
+          <div style={{ maxHeight: '220px', overflow: 'auto', padding: '8px 16px', display: 'flex', flexDirection: 'column', gap: '3px' }}>
+            {implLog.map((entry, i) => {
+              if (entry.type === 'start') return (
+                <div key={i} style={{ color: C.accentBr, fontFamily: 'IBM Plex Mono', fontSize: '11px', fontWeight: '700', paddingTop: i > 0 ? '6px' : 0 }}>
+                  ◈ {entry.message}
+                </div>
+              );
+              if (entry.type === 'mock') return (
+                <div key={i} style={{ color: C.green, fontFamily: 'IBM Plex Mono', fontSize: '10px', fontWeight: '700', letterSpacing: '0.1em', paddingTop: '6px' }}>
+                  ⬡ {entry.message}
+                </div>
+              );
+              if (entry.type === 'service') return (
+                <div key={i} style={{ color: C.purple, fontFamily: 'IBM Plex Mono', fontSize: '10px', fontWeight: '700', letterSpacing: '0.1em', paddingTop: '6px' }}>
+                  ── {entry.message} ──
+                </div>
+              );
+              if (entry.type === 'thinking') return (
+                <div key={i} style={{ color: C.dim, fontFamily: 'IBM Plex Mono', fontSize: '10px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <span style={{ display: 'inline-flex', gap: '2px' }}>
+                    <span className="dot" /><span className="dot" /><span className="dot" />
+                  </span>
+                  {entry.message}
+                </div>
+              );
+              if (entry.type === 'file') return (
+                <div key={i} style={{ color: C.muted, fontFamily: 'IBM Plex Mono', fontSize: '10px' }}>
+                  <span style={{ color: C.green }}>✎</span> {entry.path || entry.message}
+                </div>
+              );
+              if (entry.type === 'push') return (
+                <div key={i} style={{ color: C.amber, fontFamily: 'IBM Plex Mono', fontSize: '10px' }}>
+                  ↑ {entry.message}
+                </div>
+              );
+              if (entry.type === 'done') return (
+                <div key={i} style={{ color: C.green, fontFamily: 'IBM Plex Mono', fontSize: '11px', fontWeight: '700', paddingTop: '6px' }}>
+                  ✓ {entry.message}{' '}
+                  {entry.repoUrl && (
+                    <a href={entry.repoUrl} target="_blank" rel="noreferrer"
+                      style={{ color: C.accentBr, textDecoration: 'underline', fontWeight: '400' }}>
+                      {entry.repoUrl}
+                    </a>
+                  )}
+                  {entry.errors?.length > 0 && (
+                    <span style={{ color: C.amber, fontWeight: '400' }}> ({entry.errors.length} push errors)</span>
+                  )}
+                </div>
+              );
+              if (entry.type === 'info') return (
+                <div key={i} style={{ color: C.dim, fontFamily: 'IBM Plex Mono', fontSize: '10px', fontStyle: 'italic' }}>
+                  ℹ {entry.message}
+                </div>
+              );
+              if (entry.type === 'error') return (
+                <div key={i} style={{ color: C.red, fontFamily: 'IBM Plex Mono', fontSize: '11px' }}>
+                  ✗ {entry.message}
+                </div>
+              );
+              return null;
+            })}
+            {implRunning && implLog.length === 0 && (
+              <div style={{ color: C.dim, fontFamily: 'IBM Plex Mono', fontSize: '10px', display: 'flex', gap: '6px', alignItems: 'center' }}>
+                <span style={{ display: 'inline-flex', gap: '2px' }}><span className="dot" /><span className="dot" /><span className="dot" /></span>
+                Starting…
+              </div>
+            )}
+            <div ref={implLogEndRef} />
+          </div>
+        </div>
+      )}
+
       {/* ── Body ── */}
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
 
@@ -915,9 +1406,20 @@ export default function ArchitectAI() {
                     <div key={s.id} className="svc"
                       onClick={() => setSelected(isSel ? null : s)}
                       style={{ padding: '8px 10px', marginBottom: '3px', borderRadius: '6px', cursor: 'pointer', background: isSel ? C.card : 'transparent', border: `1px solid ${isSel ? col + '55' : 'transparent'}` }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '7px', marginBottom: '2px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '2px' }}>
                         <div style={{ width: '6px', height: '6px', borderRadius: '50%', background: col, flexShrink: 0 }} />
-                        <div style={{ color: C.text, fontSize: '12px', fontWeight: '600', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.name}</div>
+                        <div style={{ color: C.text, fontSize: '12px', fontWeight: '600', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{s.name}</div>
+                        {s.archetype && s.archetype !== 'http' && (
+                          <span style={{
+                            background: (ARCHETYPE_COLORS[s.archetype] || C.accentBr) + '22',
+                            border: `1px solid ${(ARCHETYPE_COLORS[s.archetype] || C.accentBr)}44`,
+                            borderRadius: '3px', padding: '0 4px',
+                            color: ARCHETYPE_COLORS[s.archetype] || C.accentBr,
+                            fontFamily: 'IBM Plex Mono', fontSize: '8px', fontWeight: '700', flexShrink: 0,
+                          }}>
+                            {archetypeLabel(s.archetype)}
+                          </span>
+                        )}
                       </div>
                       <div style={{ color: C.muted, fontSize: '11px', paddingLeft: '13px', fontFamily: 'IBM Plex Mono', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.tech || '—'}</div>
                       <div style={{ paddingLeft: '13px', marginTop: '3px', display: 'flex', gap: '6px' }}>
@@ -1029,7 +1531,7 @@ export default function ArchitectAI() {
           )}
 
           {/* Service detail overlay (not shown in export view) */}
-          {selected && view !== 'export' && <DetailPanel service={selected} onClose={() => setSelected(null)} />}
+          {selected && view !== 'export' && <DetailPanel service={selected} onClose={() => setSelected(null)} onUpdate={updateService} />}
         </div>
       </div>
     </div>
