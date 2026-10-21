@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { useAuth0 } from '@auth0/auth0-react';
+import { useAuth } from 'react-oidc-context';
 
 // ── Color tokens ──────────────────────────────────────────────────────────────
 const C = {
@@ -490,10 +490,11 @@ function ExportPanel({ services, projectName }) {
 
 // ── Main App ──────────────────────────────────────────────────────────────────
 export default function ArchitectAI() {
-  const { isAuthenticated, isLoading, loginWithRedirect, logout, getAccessTokenSilently, user } = useAuth0();
+  const auth = useAuth();
+  const { isAuthenticated, isLoading, user } = auth;
 
   const api = async (path, method = 'GET', body = null) => {
-    const token = await getAccessTokenSilently();
+    const token = auth.user?.access_token;
     const baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001';
     const res = await fetch(`${baseUrl}${path}`, {
       method,
@@ -511,6 +512,10 @@ export default function ArchitectAI() {
   const [apiKeySaving, setApiKeySaving] = useState(false);
   const [apiKeyError, setApiKeyError] = useState('');
 
+  // Setup screen state (first-login onboarding)
+  const [setupGhToken, setSetupGhToken] = useState('');
+  const [setupGhOwner, setSetupGhOwner] = useState('');
+
   // GitHub user-level credentials (stored server-side)
   const [ghHasToken, setGhHasToken] = useState(false);
   const [ghOwner, setGhOwner]       = useState('');
@@ -527,6 +532,28 @@ export default function ArchitectAI() {
       setProfileChecked(true);
     }).catch(() => setProfileChecked(true));
   }, [isAuthenticated]);
+
+  // Saves all three required credentials during first-login onboarding
+  async function saveSetup() {
+    if (!apiKeyInput.trim() || !setupGhToken.trim() || !setupGhOwner.trim()) return;
+    setApiKeySaving(true);
+    setApiKeyError('');
+    try {
+      const keyResult = await api('/api/user/profile', 'PUT', { anthropicApiKey: apiKeyInput.trim() });
+      if (keyResult.error) throw new Error(keyResult.error);
+      const ghResult = await api('/api/user/github', 'PUT', { githubToken: setupGhToken.trim(), githubOwner: setupGhOwner.trim() });
+      if (ghResult.error) throw new Error(ghResult.error);
+      setHasApiKey(true);
+      setGhHasToken(true);
+      setGhOwner(setupGhOwner.trim());
+      setApiKeyInput('');
+      setSetupGhToken('');
+      setSetupGhOwner('');
+    } catch (e) {
+      setApiKeyError(e.message);
+    }
+    setApiKeySaving(false);
+  }
 
   async function saveApiKey() {
     if (!apiKeyInput.trim()) return;
@@ -574,7 +601,7 @@ export default function ArchitectAI() {
   const saveEcosystemTimer = useRef(null);
 
   useEffect(() => {
-    if (!isAuthenticated || !profileChecked || !hasApiKey) return;
+    if (!isAuthenticated || !profileChecked || !hasApiKey || !ghHasToken || !ghOwner) return;
     api('/api/ecosystem').then(data => {
       if (data.services?.length) setServices(data.services);
       if (data.projectName)      setProjectName(data.projectName);
@@ -586,7 +613,7 @@ export default function ArchitectAI() {
       }
       setHydrated(true);
     }).catch(() => setHydrated(true));
-  }, [isAuthenticated, profileChecked, hasApiKey]);
+  }, [isAuthenticated, profileChecked, hasApiKey, ghHasToken, ghOwner]);
 
   // Debounced save to server whenever ecosystem state changes
   useEffect(() => {
@@ -651,7 +678,7 @@ export default function ArchitectAI() {
   if (!isAuthenticated) return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100vh', background: '#07101f', gap: '16px' }}>
       <div style={{ color: '#3b82f6', fontFamily: 'IBM Plex Mono', fontSize: '24px', fontWeight: 700 }}>◈ ARCHITECTAI</div>
-      <button onClick={() => loginWithRedirect()} style={{ background: '#2563eb', color: '#fff', border: 'none', borderRadius: '8px', padding: '12px 28px', fontFamily: 'IBM Plex Mono', fontSize: '13px', fontWeight: 700, cursor: 'pointer' }}>
+      <button onClick={() => auth.signinRedirect()} style={{ background: '#2563eb', color: '#fff', border: 'none', borderRadius: '8px', padding: '12px 28px', fontFamily: 'IBM Plex Mono', fontSize: '13px', fontWeight: 700, cursor: 'pointer' }}>
         SIGN IN
       </button>
     </div>
@@ -659,28 +686,46 @@ export default function ArchitectAI() {
   if (!profileChecked) return (
     <div style={{ color: '#64748b', padding: '40px', fontFamily: 'IBM Plex Mono' }}>Loading…</div>
   );
-  if (!hasApiKey) return (
+  if (!hasApiKey || !ghHasToken || !ghOwner) return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100vh', background: C.bg, gap: '20px' }}>
       <div style={{ color: C.accentBr, fontFamily: 'IBM Plex Mono', fontSize: '24px', fontWeight: 700 }}>◈ ARCHITECTAI</div>
-      <div style={{ color: C.muted, fontFamily: 'IBM Plex Mono', fontSize: '13px', textAlign: 'center', maxWidth: '360px', lineHeight: '1.6' }}>
-        To get started, enter your Anthropic API key.<br />
-        It will be stored securely and used only for your account.
+      <div style={{ color: C.muted, fontFamily: 'IBM Plex Mono', fontSize: '13px', textAlign: 'center', maxWidth: '380px', lineHeight: '1.6' }}>
+        Before you begin, save your credentials.<br />
+        These are stored securely and used only for your account.
       </div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', width: '320px' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', width: '340px' }}>
+        <div style={{ color: C.dim, fontFamily: 'IBM Plex Mono', fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Anthropic API Key</div>
         <input
           type="password"
           placeholder="sk-ant-…"
           value={apiKeyInput}
           onChange={e => setApiKeyInput(e.target.value)}
-          onKeyDown={e => e.key === 'Enter' && saveApiKey()}
+          style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: '8px', color: C.text, fontFamily: 'IBM Plex Mono', fontSize: '13px', padding: '10px 14px', outline: 'none' }}
+        />
+        <div style={{ color: C.dim, fontFamily: 'IBM Plex Mono', fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.05em', marginTop: '6px' }}>GitHub Username</div>
+        <input
+          type="text"
+          placeholder="your-github-username"
+          value={setupGhOwner}
+          onChange={e => setSetupGhOwner(e.target.value)}
+          style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: '8px', color: C.text, fontFamily: 'IBM Plex Mono', fontSize: '13px', padding: '10px 14px', outline: 'none' }}
+        />
+        <div style={{ color: C.dim, fontFamily: 'IBM Plex Mono', fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.05em', marginTop: '6px' }}>GitHub Personal Access Token</div>
+        <input
+          type="password"
+          placeholder="ghp_…"
+          value={setupGhToken}
+          onChange={e => setSetupGhToken(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && saveSetup()}
           style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: '8px', color: C.text, fontFamily: 'IBM Plex Mono', fontSize: '13px', padding: '10px 14px', outline: 'none' }}
         />
         {apiKeyError && <div style={{ color: C.red, fontFamily: 'IBM Plex Mono', fontSize: '11px' }}>{apiKeyError}</div>}
-        <button onClick={saveApiKey} disabled={apiKeySaving || !apiKeyInput.trim()}
-          style={{ background: C.accent, color: '#fff', border: 'none', borderRadius: '8px', padding: '12px', fontFamily: 'IBM Plex Mono', fontSize: '13px', fontWeight: 700, cursor: apiKeySaving ? 'not-allowed' : 'pointer', opacity: apiKeyInput.trim() ? 1 : 0.5 }}>
+        <button onClick={saveSetup}
+          disabled={apiKeySaving || !apiKeyInput.trim() || !setupGhToken.trim() || !setupGhOwner.trim()}
+          style={{ background: C.accent, color: '#fff', border: 'none', borderRadius: '8px', padding: '12px', fontFamily: 'IBM Plex Mono', fontSize: '13px', fontWeight: 700, cursor: apiKeySaving ? 'not-allowed' : 'pointer', opacity: (apiKeyInput.trim() && setupGhToken.trim() && setupGhOwner.trim()) ? 1 : 0.5, marginTop: '4px' }}>
           {apiKeySaving ? 'SAVING…' : 'SAVE & CONTINUE'}
         </button>
-        <button onClick={() => logout({ logoutParams: { returnTo: window.location.origin } })}
+        <button onClick={() => auth.signoutRedirect()}
           style={{ background: 'none', border: 'none', color: C.muted, fontFamily: 'IBM Plex Mono', fontSize: '11px', cursor: 'pointer', padding: '4px' }}>
           sign out
         </button>
@@ -1049,7 +1094,7 @@ export default function ArchitectAI() {
               ⟳ builds
             </button>
           )}
-          <button onClick={() => logout({ logoutParams: { returnTo: window.location.origin } })}
+          <button onClick={() => auth.signoutRedirect()}
             style={{ background: 'none', border: `1px solid ${C.border}`, borderRadius: '4px', color: C.dim, cursor: 'pointer', fontSize: '11px', fontFamily: 'IBM Plex Mono', padding: '2px 8px' }}>
             sign out
           </button>
